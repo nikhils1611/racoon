@@ -12,11 +12,6 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-
     - name: Install Salesforce CLI
       run: |
         npm install --global @salesforce/cli
@@ -37,7 +32,7 @@ jobs:
 
     - name: Deploy to Sandbox
       run: |
-        sf project deploy start --source-dir force-app --wait 10 --test-level RunLocalTests --target-org sandbox
+        sf project deploy start --source-dir force-app --wait 10 --test-level RunLocalTests --ignore-conflicts --target-org sandbox
 
     - name: Deployment Status
       if: always()
