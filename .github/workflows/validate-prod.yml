@@ -1,0 +1,25 @@
+name: Deploy to Sandbox
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: Setup Salesforce CLI
+      uses: sfdx-actions/setup-sfdx@v1
+
+    - name: Authenticate using SFDX Auth URL
+      run: |
+        echo "${{ secrets.SF_AUTH_URL }}" > authfile.txt
+        sfdx auth:sfdxurl:store -f authfile.txt --setdefaultusername --setalias sandbox
+
+    - name: Deploy metadata to Sandbox
+      run: |
+        sfdx force:source:deploy -p force-app -w 10 -l RunLocalTests
