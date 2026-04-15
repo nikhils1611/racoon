@@ -1,10 +1,12 @@
+
+
 name: Deploy delta to main on merge
 
 on:
   pull_request:
     branches:
       - main
-   
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -22,7 +24,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v3
         with:
-          node-version: '>=16'
+          node-version: ">=16"
           check-latest: true
 
       # 3. Install Salesforce CLI + Delta Plugin
@@ -64,11 +66,24 @@ jobs:
             echo "apex_present=false" >> $GITHUB_OUTPUT
           fi
 
-      # 9. Extract changed Apex class names and count them correctly
+      # 9. Extract only non-test Apex class names
       - name: Get changed Apex classes
         id: changed_apex
         run: |
-          CLASS_NAMES=$(awk '/<name>ApexClass<\/name>/{flag=1;next} /<\/types>/{flag=0} flag && /<members>/{gsub(/.*<members>|<\/members>.*/,""); print}' package/package.xml)
+          CLASS_NAMES=$(python3 - <<'EOF'
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('package/package.xml')
+          ns = {'sf': 'http://soap.sforce.com/2006/04/metadata'}
+          classes = []
+          for t in tree.findall('sf:types', ns):
+              name = t.find('sf:name', ns)
+              if name is not None and name.text == 'ApexClass':
+                  for m in t.findall('sf:members', ns):
+                      if not m.text.endswith('Test'):
+                          classes.append(m.text)
+          print('\n'.join(classes))
+          EOF
+          )
 
           if [ -z "$CLASS_NAMES" ]; then
             echo "classes=" >> $GITHUB_OUTPUT
@@ -79,16 +94,14 @@ jobs:
             echo "class_count=$COUNT" >> $GITHUB_OUTPUT
           fi
 
-      # 10. Map each changed class to its expected test class name
+      # 10. Map each non-test class to its expected test class name
       - name: Map Apex classes to test classes
         id: map_tests
         run: |
           TEST_CLASSES=""
           for cls in ${{ steps.changed_apex.outputs.classes }}; do
-            TEST_NAME="${cls}Test"
-            TEST_CLASSES="$TEST_CLASSES $TEST_NAME"
+            TEST_CLASSES="$TEST_CLASSES ${cls}Test"
           done
-          # Trim leading space; SF CLI expects space-separated test names
           TEST_CLASSES="${TEST_CLASSES# }"
           echo "mapped_tests=$TEST_CLASSES" >> $GITHUB_OUTPUT
 
@@ -122,7 +135,7 @@ jobs:
         if: always()
         run: rm -f ./SF_AUTH_URL.txt
 
-      # 14. Smart deploy: choose test level based on Apex presence and test coverage
+      # 14. Smart deploy
       - name: Deploy delta package
         run: |
           if [ "${{ steps.check_apex.outputs.apex_present }}" = "true" ]; then
