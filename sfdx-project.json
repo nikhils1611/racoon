@@ -5,11 +5,7 @@
       "default": true
     }
   ],
-<<<<<<< HEAD
-  "name": "curiouscode",
-=======
   "name": "Racoon",
->>>>>>> 0eb7c50 (first commit)
   "namespace": "",
   "sfdcLoginUrl": "https://login.salesforce.com",
   "sourceApiVersion": "65.0"
