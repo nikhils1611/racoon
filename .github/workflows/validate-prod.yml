@@ -98,13 +98,9 @@ jobs:
         run: |
           TEST_CLASSES=""
           for cls in ${{ steps.changed_apex.outputs.classes }}; do
-            if [ -z "$TEST_CLASSES" ]; then
-              TEST_CLASSES="${cls}Test"
-            else
-              TEST_CLASSES="$TEST_CLASSES,${cls}Test"
-            fi
+            TEST_CLASSES="$TEST_CLASSES ${cls}Test"
           done
-
+          TEST_CLASSES="${TEST_CLASSES# }"
           echo "mapped_tests=$TEST_CLASSES" >> $GITHUB_OUTPUT
 
       # 11. Validate that each mapped test class actually exists in the repo
@@ -114,20 +110,14 @@ jobs:
           VALID_COUNT=0
           VALID_TESTS=""
 
-          # Convert comma-separated to space-separated
-          IFS=',' read -ra TEST_ARRAY <<< "${{ steps.map_tests.outputs.mapped_tests }}"
-
-          for test in "${TEST_ARRAY[@]}"; do
+          for test in ${{ steps.map_tests.outputs.mapped_tests }}; do
             if find force-app -name "${test}.cls" | grep -q .; then
-              if [ -z "$VALID_TESTS" ]; then
-                VALID_TESTS="$test"
-              else
-                VALID_TESTS="$VALID_TESTS,$test"
-              fi
+              VALID_TESTS="$VALID_TESTS $test"
               VALID_COUNT=$((VALID_COUNT + 1))
             fi
           done
 
+          VALID_TESTS="${VALID_TESTS# }"
           echo "valid_tests=$VALID_TESTS" >> $GITHUB_OUTPUT
           echo "valid_count=$VALID_COUNT" >> $GITHUB_OUTPUT
 
