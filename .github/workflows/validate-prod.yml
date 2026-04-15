@@ -1,17 +1,17 @@
-name: Automatic deploy release to  main
+name: Deploy delta to main on merge
 
 on:
   pull_request:
     branches:
-      - main   # changed from merge → main
-
+      - main
+   
 jobs:
   build:
     runs-on: ubuntu-latest
     environment: Salesforce
 
     steps:
-      # 1. Checkout code
+      # 1. Checkout full history (needed for delta comparison)
       - name: Checkout source code
         uses: actions/checkout@v3
         with:
@@ -31,26 +31,30 @@ jobs:
           npm install @salesforce/cli --global
           echo y | sf plugins install sfdx-git-delta
 
-      # 4. Fetch branches
+      # 4. Fetch all branches for delta comparison
       - name: Git Fetch
         run: |
           git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
           git fetch --all
 
-      # 5. Generate Delta Package
+      # 5. Generate delta package (PR head vs main base)
       - name: Generate DIFF Package
         run: |
-          sf sgd source delta --to HEAD --from origin/main --ignore .gitignore --output .
+          sf sgd source delta \
+            --to HEAD \
+            --from origin/main \
+            --output . \
+            $([ -f .gitignore ] && echo "--ignore .gitignore" || true)
 
-      # 6. Display package.xml
+      # 6. Display package.xml for debug visibility
       - name: Display Package XML
         run: cat package/package.xml
 
-      # 7. Convert to Metadata format
+      # 7. Convert to metadata format
       - name: Convert to Metadata
         run: sf project convert source -x package/package.xml -d convert
 
-      # 8. Check Apex presence
+      # 8. Check whether package contains Apex
       - name: Check for Apex in package
         id: check_apex
         run: |
@@ -60,85 +64,87 @@ jobs:
             echo "apex_present=false" >> $GITHUB_OUTPUT
           fi
 
-      # 9. Get Changed Apex Classes
-      - name: Get Changed Apex Classes
+      # 9. Extract changed Apex class names and count them correctly
+      - name: Get changed Apex classes
         id: changed_apex
         run: |
-          CLASS_NAMES=$(awk '/<name>ApexClass<\/name>/{flag=1;next}/<\/types>/{flag=0}flag' package/package.xml | grep -oP '(?<=<members>).*?(?=</members>)')
-          COUNT=$(echo "$CLASS_NAMES" | wc -l)
-          
-          echo "classes=$(echo $CLASS_NAMES | tr '\n' ' ')" >> $GITHUB_OUTPUT
-          echo "class_count=$COUNT" >> $GITHUB_OUTPUT
+          CLASS_NAMES=$(awk '/<name>ApexClass<\/name>/{flag=1;next} /<\/types>/{flag=0} flag && /<members>/{gsub(/.*<members>|<\/members>.*/,""); print}' package/package.xml)
 
-      # 10. Map to Test Classes
-      - name: Map Apex Classes to Test Classes
+          if [ -z "$CLASS_NAMES" ]; then
+            echo "classes=" >> $GITHUB_OUTPUT
+            echo "class_count=0" >> $GITHUB_OUTPUT
+          else
+            COUNT=$(echo "$CLASS_NAMES" | grep -c .)
+            echo "classes=$(echo $CLASS_NAMES | tr '\n' ' ')" >> $GITHUB_OUTPUT
+            echo "class_count=$COUNT" >> $GITHUB_OUTPUT
+          fi
+
+      # 10. Map each changed class to its expected test class name
+      - name: Map Apex classes to test classes
         id: map_tests
         run: |
           TEST_CLASSES=""
-          for cls in ${{ steps.changed_apex.outputs.classes }}
-          do
+          for cls in ${{ steps.changed_apex.outputs.classes }}; do
             TEST_NAME="${cls}Test"
-            TEST_CLASSES="$TEST_CLASSES,$TEST_NAME"
+            TEST_CLASSES="$TEST_CLASSES $TEST_NAME"
           done
-          TEST_CLASSES=$(echo $TEST_CLASSES | sed 's/^,//')
+          # Trim leading space; SF CLI expects space-separated test names
+          TEST_CLASSES="${TEST_CLASSES# }"
           echo "mapped_tests=$TEST_CLASSES" >> $GITHUB_OUTPUT
 
-      # 11. Validate ALL test classes exist
-      - name: Validate Test Classes
+      # 11. Validate that each mapped test class actually exists in the repo
+      - name: Validate test classes exist
         id: validate_tests
         run: |
           VALID_COUNT=0
-          TOTAL_COUNT=${{ steps.changed_apex.outputs.class_count }}
-
-          TEST_LIST=$(echo "${{ steps.map_tests.outputs.mapped_tests }}" | tr ',' ' ')
           VALID_TESTS=""
 
-          for test in $TEST_LIST
-          do
-            if find force-app -name "$test.cls" | grep -q .; then
-              VALID_TESTS="$VALID_TESTS,$test"
-              VALID_COUNT=$((VALID_COUNT+1))
+          for test in ${{ steps.map_tests.outputs.mapped_tests }}; do
+            if find force-app -name "${test}.cls" | grep -q .; then
+              VALID_TESTS="$VALID_TESTS $test"
+              VALID_COUNT=$((VALID_COUNT + 1))
             fi
           done
 
-          VALID_TESTS=$(echo $VALID_TESTS | sed 's/^,//')
-
+          VALID_TESTS="${VALID_TESTS# }"
           echo "valid_tests=$VALID_TESTS" >> $GITHUB_OUTPUT
           echo "valid_count=$VALID_COUNT" >> $GITHUB_OUTPUT
 
-      # 12. Authenticate Org (updated secret)
+      # 12. Authenticate to Salesforce org
       - name: Populate auth file
-        run: echo ${{ secrets.SF_AUTH_URL }} > ./SF_AUTH_URL.txt
+        run: echo "${{ secrets.SF_AUTH_URL }}" > ./SF_AUTH_URL.txt
 
-      - name: Authenticate Org
+      - name: Authenticate org
         run: sf org login sfdx-url -f ./SF_AUTH_URL.txt -a sitorg -d
 
-      # 13. Smart Deployment
-      - name: Deploy DIFF package (Strict Mapping)
+      # 13. Clean up auth file immediately after use
+      - name: Remove auth file
+        if: always()
+        run: rm -f ./SF_AUTH_URL.txt
+
+      # 14. Smart deploy: choose test level based on Apex presence and test coverage
+      - name: Deploy delta package
         run: |
           if [ "${{ steps.check_apex.outputs.apex_present }}" = "true" ]; then
-            
             TOTAL=${{ steps.changed_apex.outputs.class_count }}
             VALID=${{ steps.validate_tests.outputs.valid_count }}
 
-            if [ "$TOTAL" -eq "$VALID" ] && [ "$TOTAL" -gt 0 ]; then
-              echo "✅ All test classes found → Running specified tests"
+            if [ "$TOTAL" -gt 0 ] && [ "$TOTAL" -eq "$VALID" ]; then
+              echo "All $TOTAL test class(es) found — running specified tests"
               sf project deploy start \
                 --metadata-dir convert \
                 --test-level RunSpecifiedTests \
                 --tests "${{ steps.validate_tests.outputs.valid_tests }}" \
                 -w 60 -o sitorg --verbose
-            
             else
-              echo "⚠️ Missing test classes → Running all local tests"
+              echo "Missing test classes ($VALID/$TOTAL found) — running all local tests"
               sf project deploy start \
                 --metadata-dir convert \
                 --test-level RunLocalTests \
                 -w 60 -o sitorg --verbose
             fi
-          
           else
-            echo "✅ No Apex → Skipping tests"
+            echo "No Apex in package — skipping tests"
             sf project deploy start \
               --metadata-dir convert \
               --test-level NoTestRun \
