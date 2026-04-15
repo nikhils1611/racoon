@@ -114,14 +114,20 @@ jobs:
           VALID_COUNT=0
           VALID_TESTS=""
 
-          for test in ${{ steps.map_tests.outputs.mapped_tests }}; do
+          # Convert comma-separated to space-separated
+          IFS=',' read -ra TEST_ARRAY <<< "${{ steps.map_tests.outputs.mapped_tests }}"
+
+          for test in "${TEST_ARRAY[@]}"; do
             if find force-app -name "${test}.cls" | grep -q .; then
-              VALID_TESTS="$VALID_TESTS $test"
+              if [ -z "$VALID_TESTS" ]; then
+                VALID_TESTS="$test"
+              else
+                VALID_TESTS="$VALID_TESTS,$test"
+              fi
               VALID_COUNT=$((VALID_COUNT + 1))
             fi
           done
 
-          VALID_TESTS="${VALID_TESTS# }"
           echo "valid_tests=$VALID_TESTS" >> $GITHUB_OUTPUT
           echo "valid_count=$VALID_COUNT" >> $GITHUB_OUTPUT
 
