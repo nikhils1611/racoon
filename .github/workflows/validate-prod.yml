@@ -141,21 +141,30 @@ jobs:
             VALID=${{ steps.validate_tests.outputs.valid_count }}
 
             if [ "$TOTAL" -gt 0 ] && [ "$TOTAL" -eq "$VALID" ]; then
-              echo "All $TOTAL test class(es) found — running specified tests"
+              echo "✅ All $TOTAL test class(es) found — RunSpecifiedTests"
+
+              # Build repeated --tests flags: --tests Test1 --tests Test2
+              TESTS_FLAGS=""
+              for test in ${{ steps.validate_tests.outputs.valid_tests }}; do
+                TESTS_FLAGS="$TESTS_FLAGS --tests $test"
+              done
+
               sf project deploy start \
                 --metadata-dir convert \
                 --test-level RunSpecifiedTests \
-                --tests "${{ steps.validate_tests.outputs.valid_tests }}" \
+                $TESTS_FLAGS \
                 -w 60 -o sitorg --verbose
+
             else
-              echo "Missing test classes ($VALID/$TOTAL found) — running all local tests"
+              echo "⚠️ Missing test classes — RunLocalTests"
               sf project deploy start \
                 --metadata-dir convert \
                 --test-level RunLocalTests \
                 -w 60 -o sitorg --verbose
             fi
+
           else
-            echo "No Apex in package — skipping tests"
+            echo "✅ No Apex — skipping tests"
             sf project deploy start \
               --metadata-dir convert \
               --test-level NoTestRun \
