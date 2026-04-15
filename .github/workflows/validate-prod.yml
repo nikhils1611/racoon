@@ -1,5 +1,3 @@
-
-
 name: Deploy delta to main on merge
 
 on:
@@ -100,9 +98,13 @@ jobs:
         run: |
           TEST_CLASSES=""
           for cls in ${{ steps.changed_apex.outputs.classes }}; do
-            TEST_CLASSES="$TEST_CLASSES ${cls}Test"
+            if [ -z "$TEST_CLASSES" ]; then
+              TEST_CLASSES="${cls}Test"
+            else
+              TEST_CLASSES="$TEST_CLASSES,${cls}Test"
+            fi
           done
-          TEST_CLASSES="${TEST_CLASSES# }"
+
           echo "mapped_tests=$TEST_CLASSES" >> $GITHUB_OUTPUT
 
       # 11. Validate that each mapped test class actually exists in the repo
