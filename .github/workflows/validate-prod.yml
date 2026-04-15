@@ -1,60 +1,56 @@
-#.github/workflows/sit-workflow.yml
-name: Automatic deploy release to SIT
+name: Automatic deploy release to  main
+
 on:
   pull_request:
     branches:
-      - main
+      - main   # changed from merge → main
 
 jobs:
   build:
     runs-on: ubuntu-latest
     environment: Salesforce
+
     steps:
-      # This action checks-out your repository under $GITHUB_WORKSPACE, so your workflow can access it.
-      - name: 'Checkout source code'
+      # 1. Checkout code
+      - name: Checkout source code
         uses: actions/checkout@v3
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          # Fetch all history commit
           fetch-depth: 0
-    
-      - name: 'Update Latest Node'
+
+      # 2. Setup Node
+      - name: Setup Node
         uses: actions/setup-node@v3
         with:
           node-version: '>=16'
           check-latest: true
 
-      # Install Salesforce CLI
+      # 3. Install Salesforce CLI + Delta Plugin
       - name: Install Salesforce CLI
         run: |
           npm install @salesforce/cli --global
           echo y | sf plugins install sfdx-git-delta
 
-      # Git Fetch
+      # 4. Fetch branches
       - name: Git Fetch
         run: |
           git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
           git fetch --all
 
-      # generate DIFF package
+      # 5. Generate Delta Package
       - name: Generate DIFF Package
         run: |
-          git checkout -b pr 
-          sf sgd source delta --to pr --from origin/merge --ignore .gitignore --output .  
+          sf sgd source delta --to HEAD --from origin/main --ignore .gitignore --output .
 
-      # Display Package XML
+      # 6. Display package.xml
       - name: Display Package XML
-        run: 'cat package/package.xml'
+        run: cat package/package.xml
 
-      # Echo Salesforce confg
-      - name: Check Salesforce CLI config
-        run: 'sf config list'
+      # 7. Convert to Metadata format
+      - name: Convert to Metadata
+        run: sf project convert source -x package/package.xml -d convert
 
-      # Convert Source format to Metadata format
-      - name: Convert DIFF package to Metadata
-        run: 'sf project convert source -x package/package.xml -d convert'  
-
-      # Check if Apex is present in package
+      # 8. Check Apex presence
       - name: Check for Apex in package
         id: check_apex
         run: |
@@ -63,27 +59,88 @@ jobs:
           else
             echo "apex_present=false" >> $GITHUB_OUTPUT
           fi
-      
-      # Store secret for DEVTMA hub
-      - name: 'Populate auth file with SF_AUTH_URL secret'
-        shell: bash
-        run: 'echo ${{ secrets.SF_AUTH_URL}} > ./SF_AUTH_URL.txt'
-      
-      # Authenticate DEVTMA ORG
-      - name: 'Authenticate SIT ORG'
-        run: 'sf org login sfdx-url -f ./SF_AUTH_URL.txt -a devorg -d'
-      
-      # Deploy delta package
-      - name: Deploy DIFF package
-        run: 'sf project deploy start --metadata-dir convert --test-level RunLocalTests -w 60 -o sitorg --verbose'
-      
-      # Deploy delta package
-      #- name: Deploy DIFF package
-        #run: |
-          #if [ "${{ steps.check_apex.outputs.apex_present }}" = "true" ]; then
-            #echo "Apex found → Running tests"
-            #sf project deploy start --metadata-dir convert --test-level NoTestRun -w 60 -o sitorg --verbose
-          #else
-            #echo "No Apex → Skipping tests"
-            #sf project deploy start --metadata-dir convert --test-level NoTestRun -w 60 -o sitorg --verbose
-          #fi
+
+      # 9. Get Changed Apex Classes
+      - name: Get Changed Apex Classes
+        id: changed_apex
+        run: |
+          CLASS_NAMES=$(awk '/<name>ApexClass<\/name>/{flag=1;next}/<\/types>/{flag=0}flag' package/package.xml | grep -oP '(?<=<members>).*?(?=</members>)')
+          COUNT=$(echo "$CLASS_NAMES" | wc -l)
+          
+          echo "classes=$(echo $CLASS_NAMES | tr '\n' ' ')" >> $GITHUB_OUTPUT
+          echo "class_count=$COUNT" >> $GITHUB_OUTPUT
+
+      # 10. Map to Test Classes
+      - name: Map Apex Classes to Test Classes
+        id: map_tests
+        run: |
+          TEST_CLASSES=""
+          for cls in ${{ steps.changed_apex.outputs.classes }}
+          do
+            TEST_NAME="${cls}Test"
+            TEST_CLASSES="$TEST_CLASSES,$TEST_NAME"
+          done
+          TEST_CLASSES=$(echo $TEST_CLASSES | sed 's/^,//')
+          echo "mapped_tests=$TEST_CLASSES" >> $GITHUB_OUTPUT
+
+      # 11. Validate ALL test classes exist
+      - name: Validate Test Classes
+        id: validate_tests
+        run: |
+          VALID_COUNT=0
+          TOTAL_COUNT=${{ steps.changed_apex.outputs.class_count }}
+
+          TEST_LIST=$(echo "${{ steps.map_tests.outputs.mapped_tests }}" | tr ',' ' ')
+          VALID_TESTS=""
+
+          for test in $TEST_LIST
+          do
+            if find force-app -name "$test.cls" | grep -q .; then
+              VALID_TESTS="$VALID_TESTS,$test"
+              VALID_COUNT=$((VALID_COUNT+1))
+            fi
+          done
+
+          VALID_TESTS=$(echo $VALID_TESTS | sed 's/^,//')
+
+          echo "valid_tests=$VALID_TESTS" >> $GITHUB_OUTPUT
+          echo "valid_count=$VALID_COUNT" >> $GITHUB_OUTPUT
+
+      # 12. Authenticate Org (updated secret)
+      - name: Populate auth file
+        run: echo ${{ secrets.SF_AUTH_URL }} > ./SF_AUTH_URL.txt
+
+      - name: Authenticate Org
+        run: sf org login sfdx-url -f ./SF_AUTH_URL.txt -a sitorg -d
+
+      # 13. Smart Deployment
+      - name: Deploy DIFF package (Strict Mapping)
+        run: |
+          if [ "${{ steps.check_apex.outputs.apex_present }}" = "true" ]; then
+            
+            TOTAL=${{ steps.changed_apex.outputs.class_count }}
+            VALID=${{ steps.validate_tests.outputs.valid_count }}
+
+            if [ "$TOTAL" -eq "$VALID" ] && [ "$TOTAL" -gt 0 ]; then
+              echo "✅ All test classes found → Running specified tests"
+              sf project deploy start \
+                --metadata-dir convert \
+                --test-level RunSpecifiedTests \
+                --tests "${{ steps.validate_tests.outputs.valid_tests }}" \
+                -w 60 -o sitorg --verbose
+            
+            else
+              echo "⚠️ Missing test classes → Running all local tests"
+              sf project deploy start \
+                --metadata-dir convert \
+                --test-level RunLocalTests \
+                -w 60 -o sitorg --verbose
+            fi
+          
+          else
+            echo "✅ No Apex → Skipping tests"
+            sf project deploy start \
+              --metadata-dir convert \
+              --test-level NoTestRun \
+              -w 60 -o sitorg --verbose
+          fi
