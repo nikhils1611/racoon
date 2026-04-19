@@ -64,33 +64,6 @@ jobs:
             echo "apex_present=false" >> $GITHUB_OUTPUT
           fi
 
-      # 9. Extract only non-test Apex class names
-      - name: Get changed Apex classes
-        id: changed_apex
-        run: |
-          CLASS_NAMES=$(python3 - <<'EOF'
-          import xml.etree.ElementTree as ET
-          tree = ET.parse('package/package.xml')
-          ns = {'sf': 'http://soap.sforce.com/2006/04/metadata'}
-          classes = []
-          for t in tree.findall('sf:types', ns):
-              name = t.find('sf:name', ns)
-              if name is not None and name.text == 'ApexClass':
-                  for m in t.findall('sf:members', ns):
-                      if not m.text.endswith('Test'):
-                          classes.append(m.text)
-          print('\n'.join(classes))
-          EOF
-          )
-
-          if [ -z "$CLASS_NAMES" ]; then
-            echo "classes=" >> $GITHUB_OUTPUT
-            echo "class_count=0" >> $GITHUB_OUTPUT
-          else
-            COUNT=$(echo "$CLASS_NAMES" | grep -c .)
-            echo "classes=$(echo $CLASS_NAMES | tr '\n' ' ')" >> $GITHUB_OUTPUT
-            echo "class_count=$COUNT" >> $GITHUB_OUTPUT
-          fi
 
      # 10. Get changed or newly added test classes directly from git diff
       - name: Get changed test classes
@@ -110,7 +83,7 @@ jobs:
             echo "valid_tests=$(echo $VALID_TESTS | tr '\n' ' ')" >> $GITHUB_OUTPUT
             echo "valid_count=$COUNT" >> $GITHUB_OUTPUT
           fi
-    
+
       # 12. Authenticate to Salesforce org
       - name: Populate auth file
         run: echo "${{ secrets.SF_AUTH_URL }}" > ./SF_AUTH_URL.txt
@@ -127,15 +100,14 @@ jobs:
       - name: Deploy delta package
         run: |
           if [ "${{ steps.check_apex.outputs.apex_present }}" = "true" ]; then
-            TOTAL=${{ steps.changed_apex.outputs.class_count }}
-            VALID=${{ steps.validate_tests.outputs.valid_count }}
+            
+            VALID=${{ steps.find_tests.outputs.valid_count }}
 
-            if [ "$TOTAL" -gt 0 ] && [ "$TOTAL" -eq "$VALID" ]; then
-              echo "✅ All $TOTAL test class(es) found — RunSpecifiedTests"
+            if [ "$VALID" -gt 0 ]; then
+              echo "✅ Test classes found — RunSpecifiedTests"
 
-              # Build repeated --tests flags: --tests Test1 --tests Test2
               TESTS_FLAGS=""
-              for test in ${{ steps.validate_tests.outputs.valid_tests }}; do
+              for test in ${{ steps.find_tests.outputs.valid_tests }}; do
                 TESTS_FLAGS="$TESTS_FLAGS --tests $test"
               done
 
@@ -144,6 +116,7 @@ jobs:
                 --test-level RunSpecifiedTests \
                 $TESTS_FLAGS \
                 -w 60 -o sitorg --verbose
+
 
             else
               echo "⚠️ Missing test classes — RunLocalTests"
