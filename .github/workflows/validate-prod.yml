@@ -64,62 +64,25 @@ jobs:
             echo "apex_present=false" >> $GITHUB_OUTPUT
           fi
 
-      # 9. Extract only non-test Apex class names
-      - name: Get changed Apex classes
-        id: changed_apex
-        run: |
-          CLASS_NAMES=$(python3 - <<'EOF'
-          import xml.etree.ElementTree as ET
-          tree = ET.parse('package/package.xml')
-          ns = {'sf': 'http://soap.sforce.com/2006/04/metadata'}
-          classes = []
-          for t in tree.findall('sf:types', ns):
-              name = t.find('sf:name', ns)
-              if name is not None and name.text == 'ApexClass':
-                  for m in t.findall('sf:members', ns):
-                      if not m.text.endswith('Test'):
-                          classes.append(m.text)
-          print('\n'.join(classes))
-          EOF
-          )
 
-          if [ -z "$CLASS_NAMES" ]; then
-            echo "classes=" >> $GITHUB_OUTPUT
-            echo "class_count=0" >> $GITHUB_OUTPUT
+     # 10. Get changed or newly added test classes directly from git diff
+      - name: Get changed test classes
+        id: find_tests
+        run: |
+          VALID_TESTS=$(git diff --name-only origin/main...HEAD \
+            | grep -E 'force-app/.*\.cls$' \
+            | xargs -I{} bash -c 'grep -l "@isTest" "{}" 2>/dev/null || true' \
+            | xargs -I{} basename {} .cls \
+            | sort -u)
+
+          if [ -z "$VALID_TESTS" ]; then
+            echo "valid_tests=" >> $GITHUB_OUTPUT
+            echo "valid_count=0" >> $GITHUB_OUTPUT
           else
-            COUNT=$(echo "$CLASS_NAMES" | grep -c .)
-            echo "classes=$(echo $CLASS_NAMES | tr '\n' ' ')" >> $GITHUB_OUTPUT
-            echo "class_count=$COUNT" >> $GITHUB_OUTPUT
+            COUNT=$(echo "$VALID_TESTS" | grep -c .)
+            echo "valid_tests=$(echo $VALID_TESTS | tr '\n' ' ')" >> $GITHUB_OUTPUT
+            echo "valid_count=$COUNT" >> $GITHUB_OUTPUT
           fi
-
-      # 10. Map each non-test class to its expected test class name
-      - name: Map Apex classes to test classes
-        id: map_tests
-        run: |
-          TEST_CLASSES=""
-          for cls in ${{ steps.changed_apex.outputs.classes }}; do
-            TEST_CLASSES="$TEST_CLASSES ${cls}Test"
-          done
-          TEST_CLASSES="${TEST_CLASSES# }"
-          echo "mapped_tests=$TEST_CLASSES" >> $GITHUB_OUTPUT
-
-      # 11. Validate that each mapped test class actually exists in the repo
-      - name: Validate test classes exist
-        id: validate_tests
-        run: |
-          VALID_COUNT=0
-          VALID_TESTS=""
-
-          for test in ${{ steps.map_tests.outputs.mapped_tests }}; do
-            if find force-app -name "${test}.cls" | grep -q .; then
-              VALID_TESTS="$VALID_TESTS $test"
-              VALID_COUNT=$((VALID_COUNT + 1))
-            fi
-          done
-
-          VALID_TESTS="${VALID_TESTS# }"
-          echo "valid_tests=$VALID_TESTS" >> $GITHUB_OUTPUT
-          echo "valid_count=$VALID_COUNT" >> $GITHUB_OUTPUT
 
       # 12. Authenticate to Salesforce org
       - name: Populate auth file
@@ -137,15 +100,14 @@ jobs:
       - name: Deploy delta package
         run: |
           if [ "${{ steps.check_apex.outputs.apex_present }}" = "true" ]; then
-            TOTAL=${{ steps.changed_apex.outputs.class_count }}
-            VALID=${{ steps.validate_tests.outputs.valid_count }}
+            
+            VALID=${{ steps.find_tests.outputs.valid_count }}
 
-            if [ "$TOTAL" -gt 0 ] && [ "$TOTAL" -eq "$VALID" ]; then
-              echo "✅ All $TOTAL test class(es) found — RunSpecifiedTests"
+            if [ "$VALID" -gt 0 ]; then
+              echo "✅ Test classes found — RunSpecifiedTests"
 
-              # Build repeated --tests flags: --tests Test1 --tests Test2
               TESTS_FLAGS=""
-              for test in ${{ steps.validate_tests.outputs.valid_tests }}; do
+              for test in ${{ steps.find_tests.outputs.valid_tests }}; do
                 TESTS_FLAGS="$TESTS_FLAGS --tests $test"
               done
 
@@ -154,6 +116,7 @@ jobs:
                 --test-level RunSpecifiedTests \
                 $TESTS_FLAGS \
                 -w 60 -o sitorg --verbose
+
 
             else
               echo "⚠️ Missing test classes — RunLocalTests"
