@@ -92,35 +92,25 @@ jobs:
             echo "class_count=$COUNT" >> $GITHUB_OUTPUT
           fi
 
-      # 10. Map each non-test class to its expected test class name
-      - name: Map Apex classes to test classes
-        id: map_tests
+     # 10. Get changed or newly added test classes directly from git diff
+      - name: Get changed test classes
+        id: find_tests
         run: |
-          TEST_CLASSES=""
-          for cls in ${{ steps.changed_apex.outputs.classes }}; do
-            TEST_CLASSES="$TEST_CLASSES ${cls}Test"
-          done
-          TEST_CLASSES="${TEST_CLASSES# }"
-          echo "mapped_tests=$TEST_CLASSES" >> $GITHUB_OUTPUT
+          VALID_TESTS=$(git diff --name-only origin/main...HEAD \
+            | grep -E 'force-app/.*\.cls$' \
+            | xargs -I{} bash -c 'grep -l "@isTest" "{}" 2>/dev/null || true' \
+            | xargs -I{} basename {} .cls \
+            | sort -u)
 
-      # 11. Validate that each mapped test class actually exists in the repo
-      - name: Validate test classes exist
-        id: validate_tests
-        run: |
-          VALID_COUNT=0
-          VALID_TESTS=""
-
-          for test in ${{ steps.map_tests.outputs.mapped_tests }}; do
-            if find force-app -name "${test}.cls" | grep -q .; then
-              VALID_TESTS="$VALID_TESTS $test"
-              VALID_COUNT=$((VALID_COUNT + 1))
-            fi
-          done
-
-          VALID_TESTS="${VALID_TESTS# }"
-          echo "valid_tests=$VALID_TESTS" >> $GITHUB_OUTPUT
-          echo "valid_count=$VALID_COUNT" >> $GITHUB_OUTPUT
-
+          if [ -z "$VALID_TESTS" ]; then
+            echo "valid_tests=" >> $GITHUB_OUTPUT
+            echo "valid_count=0" >> $GITHUB_OUTPUT
+          else
+            COUNT=$(echo "$VALID_TESTS" | grep -c .)
+            echo "valid_tests=$(echo $VALID_TESTS | tr '\n' ' ')" >> $GITHUB_OUTPUT
+            echo "valid_count=$COUNT" >> $GITHUB_OUTPUT
+          fi
+    
       # 12. Authenticate to Salesforce org
       - name: Populate auth file
         run: echo "${{ secrets.SF_AUTH_URL }}" > ./SF_AUTH_URL.txt
