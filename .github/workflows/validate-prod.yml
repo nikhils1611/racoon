@@ -64,47 +64,125 @@ jobs:
             echo "apex_present=false" >> $GITHUB_OUTPUT
           fi
 
-
-     # 10. Get changed or newly added test classes directly from git diff
-      - name: Get changed test classes
+      # 9. Resolve test classes from JSON — auto-discover paths, validate force-app, @isTest
+      - name: Resolve test classes from JSON mapping
         id: find_tests
         run: |
-          VALID_TESTS=$(git diff --name-only origin/main...HEAD \
-            | grep -E 'force-app/.*\.cls$' \
-            | xargs -I{} bash -c 'grep -l "@isTest" "{}" 2>/dev/null || true' \
-            | xargs -I{} basename {} .cls \
-            | sort -u)
 
-          if [ -z "$VALID_TESTS" ]; then
-            echo "valid_tests=" >> $GITHUB_OUTPUT
-            echo "valid_count=0" >> $GITHUB_OUTPUT
-          else
-            COUNT=$(echo "$VALID_TESTS" | grep -c .)
-            echo "valid_tests=$(echo $VALID_TESTS | tr '\n' ' ')" >> $GITHUB_OUTPUT
-            echo "valid_count=$COUNT" >> $GITHUB_OUTPUT
+          # ── 0. Validate JSON file exists ──────────────────────────────────
+          if [ ! -f test-mapping.json ]; then
+            echo "❌ ERROR: test-mapping.json not found in repo root"
+            exit 1
           fi
 
-      # 12. Authenticate to Salesforce org
+          echo "📄 test-mapping.json contents:"
+          cat test-mapping.json
+
+          # ── 1. Get all .cls files changed in this PR ───────────────────────
+          CHANGED_FILES=$(git diff --name-only origin/main...HEAD | grep -E '\.cls$' || true)
+          echo ""
+          echo "🔍 Changed .cls files:"
+          echo "${CHANGED_FILES:-  (none)"
+
+          VALID_TESTS=""
+          INVALID_ENTRIES=""
+          MATCHED_COUNT=0
+
+          ENTRIES=$(jq -c '.testMappings[]' test-mapping.json)
+
+          while IFS= read -r entry; do
+            APEX_CLASS=$(echo "$entry" | jq -r '.apexClass')
+            TEST_CLASS=$(echo "$entry" | jq -r '.testClass')
+
+            echo ""
+            echo "-------------------------------------------"
+            echo "🔎 Processing: $APEX_CLASS → $TEST_CLASS"
+
+            # ── 2. Auto-discover apex class path under force-app/ ────────────
+            APEX_PATH=$(find force-app -type f -name "${APEX_CLASS}.cls" 2>/dev/null | head -1)
+
+            if [ -z "$APEX_PATH" ]; then
+              echo "   ❌ SKIP: '${APEX_CLASS}.cls' not found anywhere under force-app/"
+              INVALID_ENTRIES="$INVALID_ENTRIES\n  - $APEX_CLASS: not found under force-app/"
+              continue
+            fi
+            echo "   📁 Found apex class at: $APEX_PATH"
+
+            # ── 3. Auto-discover test class in same directory ─────────────────
+            APEX_DIR=$(dirname "$APEX_PATH")
+            TEST_PATH="$APEX_DIR/${TEST_CLASS}.cls"
+
+            if [ ! -f "$TEST_PATH" ]; then
+              # Fallback: search entire force-app/ for the test class
+              TEST_PATH=$(find force-app -type f -name "${TEST_CLASS}.cls" 2>/dev/null | head -1)
+            fi
+
+            if [ -z "$TEST_PATH" ] || [ ! -f "$TEST_PATH" ]; then
+              echo "   ❌ SKIP: '${TEST_CLASS}.cls' not found anywhere under force-app/"
+              INVALID_ENTRIES="$INVALID_ENTRIES\n  - $TEST_CLASS: test class not found under force-app/"
+              continue
+            fi
+            echo "   📁 Found test class at: $TEST_PATH"
+
+            # ── 4. Validate test class has @isTest annotation ─────────────────
+            if ! grep -qi "@isTest" "$TEST_PATH"; then
+              echo "   ❌ SKIP: '$TEST_CLASS' does not contain @isTest annotation"
+              INVALID_ENTRIES="$INVALID_ENTRIES\n  - $TEST_CLASS: missing @isTest annotation"
+              continue
+            fi
+            echo "   ✅ @isTest annotation confirmed"
+
+            # ── 5. Check if this apex class was changed in this PR ────────────
+            if echo "$CHANGED_FILES" | grep -qF "$APEX_PATH"; then
+              echo "   ✅ MATCHED: '$APEX_CLASS' was changed — queuing '$TEST_CLASS'"
+              VALID_TESTS="$VALID_TESTS $TEST_CLASS"
+              MATCHED_COUNT=$((MATCHED_COUNT + 1))
+            else
+              echo "   ℹ️  NOT CHANGED: '$APEX_CLASS' not modified in this PR — skipping"
+            fi
+
+          done <<< "$ENTRIES"
+
+          # Trim whitespace
+          VALID_TESTS=$(echo "$VALID_TESTS" | xargs)
+
+          echo ""
+          echo "==========================================="
+          echo "📊 Summary"
+          echo "==========================================="
+          echo "Test classes to run : ${VALID_TESTS:-none}"
+          echo "Total matched       : $MATCHED_COUNT"
+
+          if [ -n "$INVALID_ENTRIES" ]; then
+            echo ""
+            echo "⚠️  Skipped entries:"
+            echo -e "$INVALID_ENTRIES"
+          fi
+
+          echo "valid_tests=$VALID_TESTS" >> $GITHUB_OUTPUT
+          echo "valid_count=$MATCHED_COUNT" >> $GITHUB_OUTPUT
+
+      # 10. Authenticate to Salesforce org
       - name: Populate auth file
         run: echo "${{ secrets.SF_AUTH_URL }}" > ./SF_AUTH_URL.txt
 
       - name: Authenticate org
         run: sf org login sfdx-url -f ./SF_AUTH_URL.txt -a sitorg -d
 
-      # 13. Clean up auth file immediately after use
+      # 11. Clean up auth file immediately after use
       - name: Remove auth file
         if: always()
         run: rm -f ./SF_AUTH_URL.txt
 
-      # 14. Smart deploy
+      # 12. Smart deploy
       - name: Deploy delta package
         run: |
           if [ "${{ steps.check_apex.outputs.apex_present }}" = "true" ]; then
-            
+
             VALID=${{ steps.find_tests.outputs.valid_count }}
 
             if [ "$VALID" -gt 0 ]; then
-              echo "✅ Test classes found — RunSpecifiedTests"
+              echo "✅ Test classes resolved — RunSpecifiedTests"
 
               TESTS_FLAGS=""
               for test in ${{ steps.find_tests.outputs.valid_tests }}; do
@@ -117,9 +195,8 @@ jobs:
                 $TESTS_FLAGS \
                 -w 60 -o sitorg --verbose
 
-
             else
-              echo "⚠️ Missing test classes — RunLocalTests"
+              echo "⚠️ No matching test classes for changed files — RunLocalTests"
               sf project deploy start \
                 --metadata-dir convert \
                 --test-level RunLocalTests \

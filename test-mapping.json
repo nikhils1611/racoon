@@ -1,0 +1,12 @@
+{
+  "testMappings": [
+    {
+      "apexClass": "AccountCreator",
+      "testClass": "AccountCreatorTest"
+    },
+    {
+      "apexClass": "AccountUpdater",
+      "testClass": "AccountUpdaterTest"
+    }
+  ]
+}
