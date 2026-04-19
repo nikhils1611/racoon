@@ -82,7 +82,7 @@ jobs:
           CHANGED_FILES=$(git diff --name-only origin/main...HEAD | grep -E '\.cls$' || true)
           echo ""
           echo "🔍 Changed .cls files:"
-          echo "${CHANGED_FILES:-  (none)"
+          echo "${CHANGED_FILES:-(none)}"
 
           VALID_TESTS=""
           INVALID_ENTRIES=""
