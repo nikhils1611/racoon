@@ -64,103 +64,101 @@ jobs:
             echo "apex_present=false" >> $GITHUB_OUTPUT
           fi
 
-      # 9. Resolve test classes from JSON — auto-discover paths, validate force-app, @isTest
-      - name: Resolve test classes from JSON mapping
+      # 9. Collect all test classes: from PR directly + mapped from changed Apex classes
+      - name: Resolve test classes
         id: find_tests
         run: |
 
-          # ── 0. Validate JSON file exists ──────────────────────────────────
+          # ── 0. Validate JSON ──────────────────────────────────────────────
           if [ ! -f test-mapping.json ]; then
             echo "❌ ERROR: test-mapping.json not found in repo root"
             exit 1
           fi
 
-          echo "📄 test-mapping.json contents:"
+          echo "📄 test-mapping.json:"
           cat test-mapping.json
 
-          # ── 1. Get all .cls files changed in this PR ───────────────────────
+          # ── 1. All .cls files changed in this PR ──────────────────────────
           CHANGED_FILES=$(git diff --name-only origin/main...HEAD | grep -E '\.cls$' || true)
           echo ""
           echo "🔍 Changed .cls files:"
           echo "${CHANGED_FILES:-(none)}"
 
-          VALID_TESTS=""
-          INVALID_ENTRIES=""
-          MATCHED_COUNT=0
+          # ── 2. Split into Apex classes vs test classes already in PR ──────
+          PR_TEST_CLASSES=""
+          PR_APEX_CLASSES=""
 
-          ENTRIES=$(jq -c '.testMappings[]' test-mapping.json)
+          while IFS= read -r filepath; do
+            [ -z "$filepath" ] && continue
 
-          while IFS= read -r entry; do
-            APEX_CLASS=$(echo "$entry" | jq -r '.apexClass')
-            TEST_CLASS=$(echo "$entry" | jq -r '.testClass')
-
-            echo ""
-            echo "-------------------------------------------"
-            echo "🔎 Processing: $APEX_CLASS → $TEST_CLASS"
-
-            # ── 2. Auto-discover apex class path under force-app/ ────────────
-            APEX_PATH=$(find force-app -type f -name "${APEX_CLASS}.cls" 2>/dev/null | head -1)
-
-            if [ -z "$APEX_PATH" ]; then
-              echo "   ❌ SKIP: '${APEX_CLASS}.cls' not found anywhere under force-app/"
-              INVALID_ENTRIES="$INVALID_ENTRIES\n  - $APEX_CLASS: not found under force-app/"
-              continue
-            fi
-            echo "   📁 Found apex class at: $APEX_PATH"
-
-            # ── 3. Auto-discover test class in same directory ─────────────────
-            APEX_DIR=$(dirname "$APEX_PATH")
-            TEST_PATH="$APEX_DIR/${TEST_CLASS}.cls"
-
-            if [ ! -f "$TEST_PATH" ]; then
-              # Fallback: search entire force-app/ for the test class
-              TEST_PATH=$(find force-app -type f -name "${TEST_CLASS}.cls" 2>/dev/null | head -1)
-            fi
-
-            if [ -z "$TEST_PATH" ] || [ ! -f "$TEST_PATH" ]; then
-              echo "   ❌ SKIP: '${TEST_CLASS}.cls' not found anywhere under force-app/"
-              INVALID_ENTRIES="$INVALID_ENTRIES\n  - $TEST_CLASS: test class not found under force-app/"
-              continue
-            fi
-            echo "   📁 Found test class at: $TEST_PATH"
-
-            # ── 4. Validate test class has @isTest annotation ─────────────────
-            if ! grep -qi "@isTest" "$TEST_PATH"; then
-              echo "   ❌ SKIP: '$TEST_CLASS' does not contain @isTest annotation"
-              INVALID_ENTRIES="$INVALID_ENTRIES\n  - $TEST_CLASS: missing @isTest annotation"
-              continue
-            fi
-            echo "   ✅ @isTest annotation confirmed"
-
-            # ── 5. Check if this apex class was changed in this PR ────────────
-            if echo "$CHANGED_FILES" | grep -qF "$APEX_PATH"; then
-              echo "   ✅ MATCHED: '$APEX_CLASS' was changed — queuing '$TEST_CLASS'"
-              VALID_TESTS="$VALID_TESTS $TEST_CLASS"
-              MATCHED_COUNT=$((MATCHED_COUNT + 1))
+            if grep -qi "@isTest" "$filepath" 2>/dev/null; then
+              classname=$(basename "$filepath" .cls)
+              PR_TEST_CLASSES="$PR_TEST_CLASSES $classname"
+              echo "   📋 PR test class: $classname"
             else
-              echo "   ℹ️  NOT CHANGED: '$APEX_CLASS' not modified in this PR — skipping"
+              classname=$(basename "$filepath" .cls)
+              PR_APEX_CLASSES="$PR_APEX_CLASSES $classname"
+              echo "   🔧 PR apex class: $classname"
+            fi
+          done <<< "$CHANGED_FILES"
+
+          echo ""
+          echo "PR Apex classes  : ${PR_APEX_CLASSES:-(none)}"
+          echo "PR Test classes  : ${PR_TEST_CLASSES:-(none)}"
+
+          # ── 3. For each changed Apex class, find mapped test class ────────
+          MAPPED_TESTS=""
+
+          for apexclass in $PR_APEX_CLASSES; do
+            MAPPED=$(jq -r --arg cls "$apexclass" \
+              '.testMappings[] | select(.apexClass == $cls) | .testClass' \
+              test-mapping.json)
+
+            if [ -z "$MAPPED" ]; then
+              echo "   ℹ️  No mapping found for: $apexclass"
+              continue
             fi
 
-          done <<< "$ENTRIES"
+            echo "   🔗 $apexclass → $MAPPED"
 
-          # Trim whitespace
-          VALID_TESTS=$(echo "$VALID_TESTS" | xargs)
+            # ── 4. Validate mapped test class exists and has @isTest ────────
+            TEST_PATH=$(find force-app -type f -name "${MAPPED}.cls" 2>/dev/null | head -1)
+
+            if [ -z "$TEST_PATH" ]; then
+              echo "   ❌ SKIP: '${MAPPED}.cls' not found under force-app/"
+              continue
+            fi
+
+            if ! grep -qi "@isTest" "$TEST_PATH"; then
+              echo "   ❌ SKIP: '$MAPPED' missing @isTest annotation"
+              continue
+            fi
+
+            # ── 5. Only add if NOT already in PR test classes ───────────────
+            if echo "$PR_TEST_CLASSES" | grep -qw "$MAPPED"; then
+              echo "   ✅ '$MAPPED' already in PR — skipping (no duplicate)"
+            else
+              echo "   ➕ '$MAPPED' not in PR — adding to test run"
+              MAPPED_TESTS="$MAPPED_TESTS $MAPPED"
+            fi
+          done
+
+          # ── 6. Merge PR test classes + mapped additions, deduplicate ──────
+          ALL_TESTS=$(echo "$PR_TEST_CLASSES $MAPPED_TESTS" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+
+          TOTAL=$(echo "$ALL_TESTS" | wc -w | xargs)
 
           echo ""
           echo "==========================================="
           echo "📊 Summary"
           echo "==========================================="
-          echo "Test classes to run : ${VALID_TESTS:-none}"
-          echo "Total matched       : $MATCHED_COUNT"
+          echo "From PR (test classes)  : ${PR_TEST_CLASSES:-(none)}"
+          echo "Added from mapping      : ${MAPPED_TESTS:-(none)}"
+          echo "Final deduplicated list : ${ALL_TESTS:-(none)}"
+          echo "Total test classes      : $TOTAL"
 
-          if [ -n "$INVALID_ENTRIES" ]; then
-            echo ""
-            echo "⚠️  Skipped entries:"
-            echo -e "$INVALID_ENTRIES"
-          fi
-
-          echo "valid_tests=$VALID_TESTS" >> $GITHUB_OUTPUT
-          echo "valid_count=$MATCHED_COUNT" >> $GITHUB_OUTPUT
+          echo "valid_tests=$ALL_TESTS" >> $GITHUB_OUTPUT
+          echo "valid_count=$TOTAL" >> $GITHUB_OUTPUT
 
       # 10. Authenticate to Salesforce org
       - name: Populate auth file
@@ -182,7 +180,7 @@ jobs:
             VALID=${{ steps.find_tests.outputs.valid_count }}
 
             if [ "$VALID" -gt 0 ]; then
-              echo "✅ Test classes resolved — RunSpecifiedTests"
+              echo "✅ Running with $VALID test class(es) — RunSpecifiedTests"
 
               TESTS_FLAGS=""
               for test in ${{ steps.find_tests.outputs.valid_tests }}; do
@@ -196,7 +194,8 @@ jobs:
                 -w 60 -o sitorg --verbose
 
             else
-              echo "⚠️ No matching test classes for changed files — RunLocalTests"
+              echo "⚠️ No test classes found (none in PR, none mapped) — RunLocalTests"
+
               sf project deploy start \
                 --metadata-dir convert \
                 --test-level RunLocalTests \
@@ -205,6 +204,7 @@ jobs:
 
           else
             echo "✅ No Apex — skipping tests"
+
             sf project deploy start \
               --metadata-dir convert \
               --test-level NoTestRun \
