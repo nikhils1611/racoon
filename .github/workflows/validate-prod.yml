@@ -121,18 +121,7 @@ jobs:
 
             echo "   🔗 $apexclass → $MAPPED"
 
-            # ── 4. Validate mapped test class exists and has @isTest ────────
-            TEST_PATH=$(find force-app -type f -name "${MAPPED}.cls" 2>/dev/null | head -1)
 
-            if [ -z "$TEST_PATH" ]; then
-              echo "   ❌ SKIP: '${MAPPED}.cls' not found under force-app/"
-              continue
-            fi
-
-            if ! grep -qi "@isTest" "$TEST_PATH"; then
-              echo "   ❌ SKIP: '$MAPPED' missing @isTest annotation"
-              continue
-            fi
 
             # ── 5. Only add if NOT already in PR test classes ───────────────
             if echo "$PR_TEST_CLASSES" | grep -qw "$MAPPED"; then
